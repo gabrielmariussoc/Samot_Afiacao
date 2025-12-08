@@ -125,6 +125,20 @@ def tratar_relatorio_matrix(arquivo_excel):
     # Remove linhas completamente vazias
     df = df.dropna(how="all")
 
+    # ----------------------------
+    # FILTRAR "Código do item"
+    # Mantém somente valores numéricos
+    # ----------------------------
+    if "Código do item" in df.columns:
+        df["Código do item"] = df["Código do item"].astype(str).str.strip()
+
+        # Mantém apenas linhas onde o valor é totalmente numérico
+        df = df[df["Código do item"].str.isnumeric()]
+
+    # Adiciona coluna com a data do relatório
+    df["Data relatorio"] = data_relatorio.date()
+
+
     # Adiciona coluna com a data do relatório
     df["Data relatorio"] = data_relatorio.date()
 
