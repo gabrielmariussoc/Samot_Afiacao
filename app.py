@@ -1,12 +1,13 @@
 import pandas as pd
 import streamlit as st
 from datetime import datetime
+import io
+import chardet
+import re
 
 # ----------------------
 # SISTEMA DE LOGIN SIMPLES
 # ----------------------
-import streamlit as st
-
 def autenticar():
     st.markdown("### 🔐 Login necessário")
 
@@ -26,6 +27,9 @@ if "logado" not in st.session_state or not st.session_state["logado"]:
     st.stop()
 
 
+# ----------------------
+# INTERFACE PRINCIPAL
+# ----------------------
 st.title("📦 Consolidador de Relatórios Matrix")
 
 st.write("""
@@ -71,47 +75,37 @@ mapa_colunas = {
 }
 
 # ----------------------
-# FUNÇÃO DE TRATAMENTO
+# FUNÇÃO DE TRATAMENTO DO EXCEL
 # ----------------------
 def tratar_relatorio_matrix(arquivo_excel):
 
-    # Lê o arquivo inteiro para pegar a data na segunda linha
     df_raw = pd.read_excel(arquivo_excel, header=None)
 
-    # Linha 2 (índice 1) contendo algo como:
-    # "Produzido em : 02/12/2025 08:14:27, Por: Andre"
     linha_data = str(df_raw.iloc[1, 0]).strip()
 
-    # Extrai apenas a data DD/MM/YYYY usando regex
-    import re
     match = re.search(r"(\d{2}/\d{2}/\d{4})", linha_data)
 
     if not match:
-        st.error(f"❌ Não foi possível localizar uma data válida na segunda linha.\nTexto encontrado: {linha_data}")
+        st.error(f"❌ Não foi possível localizar uma data válida.\nTexto: {linha_data}")
         st.stop()
 
-    data_str = match.group(1)  # extrai somente "02/12/2025"
+    data_str = match.group(1)
 
     try:
         data_relatorio = datetime.strptime(data_str, "%d/%m/%Y")
     except:
-        st.error("❌ A data encontrada não pôde ser convertida. Valor lido: " + data_str)
+        st.error("❌ A data encontrada não pôde ser convertida: " + data_str)
         st.stop()
 
-    # Valida se é a data atual
     hoje = datetime.now().date()
     if data_relatorio.date() != hoje:
-        st.error(f"❌ O relatório enviado é do dia **{data_relatorio.date()}**, não do dia **{hoje}**.\n"
-                 "Por favor gere o relatório do Matrix novamente hoje.")
+        st.error(f"❌ Relatório é do dia **{data_relatorio.date()}**, não de **{hoje}**.")
         st.stop()
 
-    # Agora lê o Excel corretamente com cabeçalho na linha 3
     df = pd.read_excel(arquivo_excel, header=2)
 
-    # Remove colunas "Unnamed"
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
 
-    # Renomeia colunas conforme mapa
     colunas_novas = {}
     for col in df.columns:
         col_limpa = col.strip()
@@ -122,27 +116,38 @@ def tratar_relatorio_matrix(arquivo_excel):
 
     df = df.rename(columns=colunas_novas)
 
-    # Remove linhas completamente vazias
     df = df.dropna(how="all")
 
-    # ----------------------------
-    # FILTRAR "Código do item"
-    # Mantém somente valores numéricos
-    # ----------------------------
-    if "Código do item" in df.columns:
-        df["Código do item"] = df["Código do item"].astype(str).str.strip()
-
-        # Mantém apenas linhas onde o valor é totalmente numérico
-        df = df[df["Código do item"].str.isnumeric()]
-
-    # Adiciona coluna com a data do relatório
-    df["Data relatorio"] = data_relatorio.date()
-
-
-    # Adiciona coluna com a data do relatório
     df["Data relatorio"] = data_relatorio.date()
 
     return df
+
+# -----------------------------
+# FUNÇÃO ROBUSTA PARA LER CSV
+# -----------------------------
+def ler_csv_com_encoding(streamlit_file):
+    raw_bytes = streamlit_file.read()
+
+    det = chardet.detect(raw_bytes)
+    encoding_detectado = det.get("encoding", "latin1")
+
+    # Tenta ler com o encoding detectado
+    try:
+        return pd.read_csv(
+            io.BytesIO(raw_bytes),
+            encoding=encoding_detectado,
+            sep=";",            # ⚠ obrigatório
+            engine="python",    # evita erros de tokenização
+        )
+    except Exception:
+        # Tenta Latin1 caso falhe
+        return pd.read_csv(
+            io.BytesIO(raw_bytes),
+            encoding="latin1",
+            sep=";",            # ⚠ obrigatório
+            engine="python",
+        )
+
 
 # ----------------------
 # UPLOAD DO CSV ANTIGO
@@ -155,34 +160,13 @@ csv_antigo = st.file_uploader("📁 Envie o CSV consolidado anterior", type=["cs
 excel_novo = st.file_uploader("📄 Envie o novo relatório Excel do Matrix", type=["xlsx"])
 
 
+# ----------------------
+# PROCESSAMENTO
+# ----------------------
 if csv_antigo and excel_novo:
+
     st.success("Arquivos carregados! Processando...")
 
-    import chardet
-    import io
-
-    def ler_csv_com_encoding(streamlit_file):
-        # Lê os bytes crus do arquivo
-        raw_bytes = streamlit_file.read()
-
-        # Detecta encoding automaticamente
-        det = chardet.detect(raw_bytes)
-        encoding_detectado = det.get("encoding", "latin1")
-
-        # Tenta ler com o encoding detectado
-        try:
-            return pd.read_csv(
-                io.BytesIO(raw_bytes),
-                encoding=encoding_detectado
-            )
-        except UnicodeDecodeError:
-            # Caso dê erro, tenta Latin1
-            return pd.read_csv(
-                io.BytesIO(raw_bytes),
-                encoding="latin1"
-            )
-
-    # Lê o CSV antigo com proteção total
     df_antigo = ler_csv_com_encoding(csv_antigo)
     df_novo = tratar_relatorio_matrix(excel_novo)
 
