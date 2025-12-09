@@ -1,9 +1,9 @@
 import pandas as pd
 import streamlit as st
 from datetime import datetime
+import re
 import io
 import chardet
-import re
 
 # ----------------------
 # SISTEMA DE LOGIN SIMPLES
@@ -26,9 +26,8 @@ if "logado" not in st.session_state or not st.session_state["logado"]:
     autenticar()
     st.stop()
 
-
 # ----------------------
-# INTERFACE PRINCIPAL
+# TÍTULO
 # ----------------------
 st.title("📦 Consolidador de Relatórios Matrix")
 
@@ -79,14 +78,17 @@ mapa_colunas = {
 # ----------------------
 def tratar_relatorio_matrix(arquivo_excel):
 
+    # Lê o arquivo bruto (para pegar a data)
     df_raw = pd.read_excel(arquivo_excel, header=None)
 
+    # Linha 2 (índice 1), exemplo:
+    # "Produzido em : 02/12/2025 08:14:27, Por: Andre"
     linha_data = str(df_raw.iloc[1, 0]).strip()
 
     match = re.search(r"(\d{2}/\d{2}/\d{4})", linha_data)
 
     if not match:
-        st.error(f"❌ Não foi possível localizar uma data válida.\nTexto: {linha_data}")
+        st.error(f"❌ Não foi possível localizar data válida na segunda linha.\nTexto: {linha_data}")
         st.stop()
 
     data_str = match.group(1)
@@ -97,15 +99,20 @@ def tratar_relatorio_matrix(arquivo_excel):
         st.error("❌ A data encontrada não pôde ser convertida: " + data_str)
         st.stop()
 
+    # Verifica se é o relatório do dia
     hoje = datetime.now().date()
     if data_relatorio.date() != hoje:
-        st.error(f"❌ Relatório é do dia **{data_relatorio.date()}**, não de **{hoje}**.")
+        st.error(f"❌ O relatório enviado é do dia **{data_relatorio.date()}**, mas hoje é **{hoje}**.\n"
+                 "Gere o relatório atualizado no Matrix.")
         st.stop()
 
+    # Lê o arquivo correto com cabeçalho na linha 3
     df = pd.read_excel(arquivo_excel, header=2)
 
+    # Remove colunas Unnamed
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
 
+    # Renomeia colunas
     colunas_novas = {}
     for col in df.columns:
         col_limpa = col.strip()
@@ -116,38 +123,13 @@ def tratar_relatorio_matrix(arquivo_excel):
 
     df = df.rename(columns=colunas_novas)
 
+    # Remove linhas vazias
     df = df.dropna(how="all")
 
+    # Cria coluna Data relatorio
     df["Data relatorio"] = data_relatorio.date()
 
     return df
-
-# -----------------------------
-# FUNÇÃO ROBUSTA PARA LER CSV
-# -----------------------------
-def ler_csv_com_encoding(streamlit_file):
-    raw_bytes = streamlit_file.read()
-
-    det = chardet.detect(raw_bytes)
-    encoding_detectado = det.get("encoding", "latin1")
-
-    # Tenta ler com o encoding detectado
-    try:
-        return pd.read_csv(
-            io.BytesIO(raw_bytes),
-            encoding=encoding_detectado,
-            sep=";",            # ⚠ obrigatório
-            engine="python",    # evita erros de tokenização
-        )
-    except Exception:
-        # Tenta Latin1 caso falhe
-        return pd.read_csv(
-            io.BytesIO(raw_bytes),
-            encoding="latin1",
-            sep=";",            # ⚠ obrigatório
-            engine="python",
-        )
-
 
 # ----------------------
 # UPLOAD DO CSV ANTIGO
@@ -161,15 +143,60 @@ excel_novo = st.file_uploader("📄 Envie o novo relatório Excel do Matrix", ty
 
 
 # ----------------------
-# PROCESSAMENTO
+# PROCESSAMENTO GERAL
 # ----------------------
 if csv_antigo and excel_novo:
 
     st.success("Arquivos carregados! Processando...")
 
+    # Função para ler CSV com fallback de encoding
+    def ler_csv_com_encoding(streamlit_file):
+        raw_bytes = streamlit_file.read()
+
+        # Detecta encoding
+        det = chardet.detect(raw_bytes)
+        encoding_detectado = det.get("encoding", "latin1")
+
+        try:
+            return pd.read_csv(io.BytesIO(raw_bytes), encoding=encoding_detectado, sep=";")
+        except:
+            return pd.read_csv(io.BytesIO(raw_bytes), encoding="latin1", sep=";")
+
+    # Lê o CSV antigo
     df_antigo = ler_csv_com_encoding(csv_antigo)
+
+    # ---------------------------------------------------
+    # 🔍 VALIDAÇÃO DAS COLUNAS OBRIGATÓRIAS DO CSV ANTIGO
+    # ---------------------------------------------------
+    colunas_obrigatorias = [
+        "Chave","Caracteristicas","Grupo","Código do item","Código item adicional",
+        "Descrição do item","Tamanho pacote","Tipo de embalagem","Tipo de item",
+        "Descrição completa do item","Nome da aplicação","Família principal","Sub família",
+        "Unidade","Nível de gerenciamento","Estoque","Qtd pedido","Fornecedor principal",
+        "Código do item do fornecedor","Grupo de autorização","Preço do item",
+        "Preço do retrabalho","Custo médio","Preço líquido do fornecedor",
+        "Preço do fornecedor","Consignação","Código de barras","Especial","Série",
+        "Número de fornecedores","Notas","Média de consumo","Ignorar limite de centro",
+        "Adicional item 1","Adicional item 2","Adicional item 3","Adicional item 4",
+        "Adicional item 5","Data relatorio"
+    ]
+
+    colunas_csv = df_antigo.columns.tolist()
+    faltando = [c for c in colunas_obrigatorias if c not in colunas_csv]
+
+    if faltando:
+        st.error(
+            "❌ O arquivo CSV enviado é inválido!\n\n"
+            "As seguintes colunas obrigatórias NÃO foram encontradas:\n\n"
+            + "\n".join(f"- {c}" for c in faltando)
+            + "\n\nPor favor, envie o CSV consolidado correto."
+        )
+        st.stop()
+
+    # Lê e trata o Excel novo
     df_novo = tratar_relatorio_matrix(excel_novo)
 
+    # Concatena
     df_final = pd.concat([df_antigo, df_novo], ignore_index=True)
 
     st.write("### 🔍 Prévia dos dados tratados:")
