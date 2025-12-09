@@ -4,6 +4,8 @@ from datetime import datetime
 import re
 import io
 import chardet
+import unicodedata
+from io import StringIO
 
 # ----------------------
 # SISTEMA DE LOGIN SIMPLES
@@ -40,7 +42,7 @@ Este sistema permite:
 """)
 
 # -----------------------------
-# MAPA DE RENOMEAÇÃO DE COLUNAS
+# MAPA DE RENOMEAÇÃO DE COLUNAS (seu mapa existente)
 # -----------------------------
 mapa_colunas = {
     "Chave  do": "Chave",
@@ -74,17 +76,71 @@ mapa_colunas = {
 }
 
 # ----------------------
+# FUNÇÕES AUXILIARES
+# ----------------------
+def normalizar_coluna(nome):
+    """Normaliza nome de coluna para comparação: lower, remove acento, underscores, espaços extras."""
+    if not isinstance(nome, str):
+        return ""
+    s = nome.strip().lower()
+    s = s.replace("_", " ").replace("-", " ")
+    s = " ".join(s.split())  # remove múltiplos espaços
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    return s
+
+def detectar_delimitador(sample_text):
+    """Escolhe delimitador mais provável a partir de uma amostra: compara counts de ; , \t |."""
+    counts = {
+        ';': sample_text.count(';'),
+        ',': sample_text.count(','),
+        '\t': sample_text.count('\t'),
+        '|': sample_text.count('|')
+    }
+    # retorna o mais frequente (mínimo 1 ocorrência)
+    delim = max(counts, key=counts.get)
+    if counts[delim] == 0:
+        return ','  # fallback
+    return delim
+
+def ler_csv_bytes_robusto(uploaded_file_bytes):
+    """
+    Tenta decodificar e ler um CSV a partir de bytes. Tenta várias codificações e
+    detecta delimitador automaticamente.
+    Retorna (df, encoding_used, delim_used)
+    """
+    # detecta encoding com chardet
+    det = chardet.detect(uploaded_file_bytes)
+    prov = det.get('encoding')
+    encodings_testar = [prov, 'utf-8', 'latin-1', 'cp1252']
+    encodings_testar = [e for e in encodings_testar if e is not None]
+
+    # pega uma amostra decodificada para detectar delim
+    for enc in encodings_testar:
+        try:
+            sample = uploaded_file_bytes.decode(enc, errors='replace')
+            delim = detectar_delimitador(sample[:5000])
+            # tenta ler com pandas a partir da string (mais robusto)
+            df = pd.read_csv(StringIO(sample), sep=delim, engine='python')
+            return df, enc, delim
+        except Exception:
+            continue
+
+    # fallback final: usar latin-1 e ; e tentativa com engine python
+    try:
+        sample = uploaded_file_bytes.decode('latin-1', errors='replace')
+        delim = detectar_delimitador(sample[:5000])
+        df = pd.read_csv(StringIO(sample), sep=delim, engine='python')
+        return df, 'latin-1', delim
+    except Exception as e:
+        # último recurso: raise com mensagem mais clara
+        raise RuntimeError("Não foi possível ler o CSV com as tentativas de encoding/delimitador.") from e
+
+# ----------------------
 # FUNÇÃO DE TRATAMENTO DO EXCEL
 # ----------------------
 def tratar_relatorio_matrix(arquivo_excel):
-
-    # Lê o arquivo bruto (para pegar a data)
     df_raw = pd.read_excel(arquivo_excel, header=None)
-
-    # Linha 2 (índice 1), exemplo:
-    # "Produzido em : 02/12/2025 08:14:27, Por: Andre"
     linha_data = str(df_raw.iloc[1, 0]).strip()
-
     match = re.search(r"(\d{2}/\d{2}/\d{4})", linha_data)
 
     if not match:
@@ -92,27 +148,21 @@ def tratar_relatorio_matrix(arquivo_excel):
         st.stop()
 
     data_str = match.group(1)
-
     try:
         data_relatorio = datetime.strptime(data_str, "%d/%m/%Y")
     except:
         st.error("❌ A data encontrada não pôde ser convertida: " + data_str)
         st.stop()
 
-    # Verifica se é o relatório do dia
     hoje = datetime.now().date()
     if data_relatorio.date() != hoje:
-        st.error(f"❌ O relatório enviado é do dia **{data_relatorio.date()}**, mas hoje é **{hoje}**.\n"
-                 "Gere o relatório atualizado no Matrix.")
+        st.error(f"❌ O relatório enviado é do dia **{data_relatorio.date()}**, mas hoje é **{hoje}**.\nGere o relatório atualizado no Matrix.")
         st.stop()
 
-    # Lê o arquivo correto com cabeçalho na linha 3
     df = pd.read_excel(arquivo_excel, header=2)
-
-    # Remove colunas Unnamed
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
 
-    # Renomeia colunas
+    # Renomeia colunas conforme mapa
     colunas_novas = {}
     for col in df.columns:
         col_limpa = col.strip()
@@ -120,53 +170,38 @@ def tratar_relatorio_matrix(arquivo_excel):
             colunas_novas[col] = mapa_colunas[col_limpa]
         else:
             colunas_novas[col] = col_limpa
-
     df = df.rename(columns=colunas_novas)
 
-    # Remove linhas vazias
     df = df.dropna(how="all")
-
-    # Cria coluna Data relatorio
     df["Data relatorio"] = data_relatorio.date()
-
     return df
 
 # ----------------------
-# UPLOAD DO CSV ANTIGO
+# UPLOADS
 # ----------------------
 csv_antigo = st.file_uploader("📁 Envie o CSV consolidado anterior", type=["csv"])
-
-# ----------------------
-# UPLOAD DO EXCEL NOVO
-# ----------------------
 excel_novo = st.file_uploader("📄 Envie o novo relatório Excel do Matrix", type=["xlsx"])
 
-
 # ----------------------
-# PROCESSAMENTO GERAL
+# PROCESSAMENTO
 # ----------------------
 if csv_antigo and excel_novo:
-
     st.success("Arquivos carregados! Processando...")
 
-    # Função para ler CSV com fallback de encoding
-    def ler_csv_com_encoding(streamlit_file):
-        raw_bytes = streamlit_file.read()
+    # Lê CSV de forma robusta a partir dos bytes
+    try:
+        raw_bytes = csv_antigo.read()
+        df_antigo, enc_used, delim_used = ler_csv_bytes_robusto(raw_bytes)
+    except Exception as e:
+        st.error("❌ Falha ao ler o CSV. Detalhe: " + str(e))
+        st.stop()
 
-        # Detecta encoding
-        det = chardet.detect(raw_bytes)
-        encoding_detectado = det.get("encoding", "latin1")
-
-        try:
-            return pd.read_csv(io.BytesIO(raw_bytes), encoding=encoding_detectado, sep=";")
-        except:
-            return pd.read_csv(io.BytesIO(raw_bytes), encoding="latin1", sep=";")
-
-    # Lê o CSV antigo
-    df_antigo = ler_csv_com_encoding(csv_antigo)
+    # Debug: mostrar encoding e delimitador detectados e colunas lidas
+    # st.info(f"Encoding detectado: {enc_used}  —  Delimitador detectado: '{delim_used}'")
+    # st.write("Colunas detectadas no CSV:", df_antigo.columns.tolist())
 
     # ---------------------------------------------------
-    # 🔍 VALIDAÇÃO DAS COLUNAS OBRIGATÓRIAS DO CSV ANTIGO
+    # 🔍 VALIDAÇÃO FLEXÍVEL DAS COLUNAS OBRIGATÓRIAS DO CSV ANTIGO
     # ---------------------------------------------------
     colunas_obrigatorias = [
         "Chave","Caracteristicas","Grupo","Código do item","Código item adicional",
@@ -181,15 +216,20 @@ if csv_antigo and excel_novo:
         "Adicional item 5","Data relatorio"
     ]
 
-    colunas_csv = df_antigo.columns.tolist()
-    faltando = [c for c in colunas_obrigatorias if c not in colunas_csv]
+    # normaliza colunas do CSV (remove acento, espaços, lower)
+    colunas_csv_normalizadas = [normalizar_coluna(c) for c in df_antigo.columns.tolist()]
+    obrig_norm = [normalizar_coluna(c) for c in colunas_obrigatorias]
+
+    # mapeia quais obrigatórias não aparecem
+    faltando_idx = [i for i, on in enumerate(obrig_norm) if on not in colunas_csv_normalizadas]
+    faltando = [colunas_obrigatorias[i] for i in faltando_idx]
 
     if faltando:
         st.error(
             "❌ O arquivo CSV enviado é inválido!\n\n"
             "As seguintes colunas obrigatórias NÃO foram encontradas:\n\n"
             + "\n".join(f"- {c}" for c in faltando)
-            + "\n\nPor favor, envie o CSV consolidado correto."
+            + "\n\nDicas:\n- Confirme que o arquivo tem delimitador correto (ex: ponto e vírgula ';')\n- Verifique codificação (salve como UTF-8 ou ANSI) e reaplique o upload"
         )
         st.stop()
 
